@@ -10,24 +10,55 @@ const router = express.Router();
 const MAX_RETRIES = 3;
 const INITIAL_DELAY = 1000;
 
-
 // GET /api/questions?topic=Probability
 router.get("/", async (req, res) => {
   const { topic } = req.query;
-  if (typeof topic !== "string" || topic.trim().length === 0) {
-    return res.status(400).json({ error: "Topic is required" });
+
+  // 1. Check whether topic is a string
+  if (typeof topic !== "string") {
+    return res.status(400).json({
+      error: "Topic must be a string",
+    });
   }
-  const normalizedTopic = topic.trim().toLowerCase();
+
+  // 2. Remove unnecessary spaces
+  const cleanedTopic = topic.trim();
+
+  // 3. Check empty topic
+  if (!cleanedTopic) {
+    return res.status(400).json({
+      error: "Topic is required",
+    });
+  }
+
+  // 4. Restrict topic length
+  if (cleanedTopic.length > 100) {
+    return res.status(400).json({
+      error: "Topic must not exceed 100 characters",
+    });
+  }
+
+  // 5. Reject unsafe characters
+  if (/[<>]|[\x00-\x1F\x7F]/.test(cleanedTopic)) {
+    return res.status(400).json({
+      error: "Topic contains invalid characters",
+    });
+  }
+
+  // 6. Normalize topic for caching
+  const normalizedTopic = cleanedTopic.toLowerCase();
   const cacheKey = `questions:${normalizedTopic}`;
 
+  // 7. Check cache
   const cachedQuestions = questionCache.get(cacheKey);
 
   if (cachedQuestions) {
     return res.json(cachedQuestions);
   }
 
+  // 8. Generate prompt using validated topic
   const prompt = `
-    Generate 5 multiple-choice aptitude questions on the topic: ${topic}.
+    Generate 5 multiple-choice aptitude questions on the topic: ${cleanedTopic}.
     Each question should have 4 options and indicate the correct answer in JSON format like:
     [
       {
@@ -41,7 +72,6 @@ router.get("/", async (req, res) => {
   `;
 
   try {
-    // Use centralised helper with per-model retry (exponential backoff)
     const { result } = await generateWithFallback(
       process.env.GEMINI_API_KEY,
       [prompt],
@@ -51,31 +81,37 @@ router.get("/", async (req, res) => {
     );
 
     const rawText = await result.response.text();
+
     let cleanedText = rawText
       .replace(/^\s*```json\s*/i, "")
       .replace(/^\s*```\s*/i, "")
       .replace(/(\s*```\s*)+$/i, "")
       .trim();
+
     let questions;
+
     try {
       questions = JSON.parse(cleanedText);
     } catch (err) {
       console.error("Gemini raw response:", rawText);
       console.error("Parse error:", err);
-      return res
-        .status(500)
-        .json({
-          error: "Failed to parse Gemini response",
-        });
+
+      return res.status(500).json({
+        error: "Failed to parse Gemini response",
+      });
     }
+
     questionCache.set(cacheKey, questions);
 
-    res.json(questions);
+    return res.json(questions);
+
   } catch (error) {
     console.error("Gemini API error:", error);
-    res
-      .status(500)
-      .json({ error: "Failed to generate questions" });
+
+    return res.status(500).json({
+      error: "Failed to generate questions",
+    });
   }
 });
+
 module.exports = router;
